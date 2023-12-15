@@ -90,6 +90,11 @@ export default function Home() {
     }
 
     const data = await response.json();
+    if(!data.results) {
+      alert("Sorry! We're currently experiencing excess traffic for this project. This is a demo project that is intended to demonstrate functionality, not to handle many requests. Please try again later!")
+      return;
+    }
+    
     setSearchResults(data.results);
     setSearchTime(data.searchTime);
   };
