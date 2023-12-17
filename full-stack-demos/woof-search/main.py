@@ -13,24 +13,25 @@ import psycopg2
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
 
-# Prepare postgres
-conn = psycopg2.connect(
-    dbname="dog_images",
-    user="postgres",
-    password="password",
-    host="localhost",
-    port="5432" 
-)
 TABLE_NAME = "images"
 
 # Performs a vector search using lantern
 def single_search(vec):
+    conn = psycopg2.connect(
+        dbname="dog_images",
+        user="postgres",
+        password="password",
+        host="localhost",
+        port="5432" 
+    )
+
     cursor = conn.cursor()
 
     cursor.execute(f"SELECT path, cos_dist(vector, ARRAY{vec}) AS dist FROM {TABLE_NAME} ORDER BY vector <-> ARRAY{vec} LIMIT 9;")
     results = cursor.fetchall()
     
     cursor.close()
+    conn.close()
     return results
 
 
