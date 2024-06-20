@@ -9,17 +9,45 @@ import numpy as np
 from pprint import pprint
 
 
-def get_yfcc_data(queries=False):
+
+def get_yfcc_data(queries=False, dataset="100K"):
+    # size: 100K or 10M
+    
     # make sure to authenticate with gcloud before running this
     # ./google-cloud-sdk/bin/gcloud auth application-default login
     # yfcc_data = pd.read_parquet("gs://pinecone-datasets-dev/yfcc-10M-filter-euclidean-formatted/queries/part-0.parquet")
     queries_str = "queries" if queries else "passages"
     yfcc_data = pd.read_parquet(
-        f"gs://pinecone-datasets-dev/yfcc-100K-filter-euclidean-formatted/{queries_str}/part-0.parquet"
+        f"gs://pinecone-datasets-dev/yfcc-{dataset}-filter-euclidean-formatted/{queries_str}/part-0.parquet"
     )
     return yfcc_data
 
+class GlobalConnManager:
+    def __init__(self, conn_string):
+        self.conn_string = conn_string
+        self.global_conn = psycopg.connect(self.conn_string)
 
+    def __enter__(self):
+        return self.global_conn
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+global_conn_manager = None
+
+
+
+def get_conn(conn_string, reuse_conn):
+    global global_conn_manager
+
+    if not reuse_conn:
+         return psycopg.connect(conn_string)
+    else:
+        if global_conn_manager is None:
+            global_conn_manager = GlobalConnManager(conn_string)
+        return global_conn_manager
+        
+        
 def recreate_table(conn_string, queries=False):
     with psycopg.connect(conn_string) as conn:
         with conn.cursor() as cur:
@@ -194,9 +222,10 @@ def vector_search(
     materialize_first=False,
     return_recall=False,
     explain=False,
+    reuse_conn=False,
 ):
     # df = pd.read_sql("""""", con=engine)
-    with psycopg.connect(conn_string) as conn:
+    with get_conn(conn_string, reuse_conn) as conn:
         with conn.cursor() as cur:
             if q_vector_id is not None:
                 assert tags is None
