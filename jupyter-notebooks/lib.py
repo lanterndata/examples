@@ -7,6 +7,9 @@ from psycopg.rows import namedtuple_row
 import json
 import numpy as np
 from pprint import pprint
+from time import time
+import matplotlib.pyplot as plt
+
 
 
 
@@ -31,11 +34,15 @@ class GlobalConnManager:
         return self.global_conn
 
     def __exit__(self, exc_type, exc_value, traceback):
-        pass
+        self.global_conn.commit()
 
 global_conn_manager = None
 
-
+def global_reconnect(conn_string):
+    global global_conn_manager
+    if global_conn_manager is not None:
+        global_conn_manager.close()
+    global_conn_manager = GlobalConnManager(conn_string)
 
 def get_conn(conn_string, reuse_conn):
     global global_conn_manager
@@ -84,8 +91,7 @@ def custom_serializer(obj):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     raise TypeError("Object of type '{}' is not JSON serializable".format(type(obj)))
-
-
+            
 def _transform_metadata(conn_string, queries=False):
     with psycopg.connect(conn_string) as conn:
         with conn.cursor() as cursor:
@@ -201,6 +207,13 @@ def pg_stat_reset(conn_string):
     with psycopg.connect(conn_string) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT pg_stat_reset();")
+         
+    # do the same for reused connection
+    global global_conn_manager
+    if global_conn_manager is not None:
+        with global_conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_stat_reset();")
 
 
 def pg_stat_show(conn_string):
@@ -223,8 +236,11 @@ def vector_search(
     return_recall=False,
     explain=False,
     reuse_conn=False,
+    pgvector=False,
+    prefilter_count=0,
 ):
     # df = pd.read_sql("""""", con=engine)
+    cast_if_pgvector = "::vector(192)" if pgvector else "::real[]"
     with get_conn(conn_string, reuse_conn) as conn:
         with conn.cursor() as cur:
             if q_vector_id is not None:
@@ -235,31 +251,53 @@ def vector_search(
 
             if tags is None:
                 assert q_vector_id is not None
-                tags_query = (
-                    f"(SELECT filter_tags from yfcc_queries where id = {q_vector_id})"
-                )
+                tags_array = f"(SELECT filter_tags from yfcc_queries where id = {q_vector_id})"
             elif isinstance(tags, int):
-                tags_query = "ARRAY[{}]".format(tags)
+                tags_array = [f"ARRAY[{tags}]"]
             else:
-                assert False, "get back and fix me"
-                tags_query = " AND ".join(
+                raise ValueError("handle later") 
+                tags_array = [f"ARRAY[{t}]" for t in tags]
+                " AND ".join(
                     ["metadata_tags @> ARRAY[{}]".format(tag) for tag in tags]
                 )
 
             if materialize_first:
                 q_vector = "ARRAY%s" % (cur.execute(q_vector).fetchone())
-                tags_query = "ARRAY%s" % (cur.execute(tags_query).fetchone())
+                if isinstance(tags_array, str):
+                    tags_from_querydb = cur.execute(tags_array).fetchone()[0]
+                    print(tags_from_querydb)
+                    tags_array = [f"ARRAY[{t}]" for t in tags_from_querydb]
+                    print(tags_array)
 
-            query = f"""
-    SELECT id, 
-        vector <-> {q_vector} as dist
-    FROM yfcc_passages 
-    WHERE 
-        metadata_tags @> {tags_query}
-    ORDER BY dist
-    LIMIT {k}"""
 
+            tags_filter_query = " AND ".join([f"metadata_tags @> {t}" for t in tags_array])
+            print("haha", tags_filter_query)
+            if prefilter_count > 0 and cur.execute(f"SELECT count(*) FROM (SELECT 1 FROM yfcc_passages WHERE metadata_tags @> {tags_array} LIMIT {prefilter_count}) sub").fetchone()[0] < prefilter_count:
+                print("Prefiltering did not return enough results, skipping")
+                query = f"""
+                WITH meta as (
+                    SELECT id,
+                    -- use the function to make sure this branch does not use the vector index
+                    l2sq_dist(vector{cast_if_pgvector}, {q_vector}{cast_if_pgvector}) as dist
+                    FROM yfcc_passages
+                    WHERE {tags_filter_query}
+                )
+                SELECT * FROM meta
+                ORDER BY dist LIMIT {k}
+                """
+            else:
+
+                query = f"""
+                SELECT id, 
+                    vector{cast_if_pgvector} <-> {q_vector}{cast_if_pgvector} as dist
+                FROM yfcc_passages 
+                WHERE {tags_filter_query}
+                ORDER BY dist
+                LIMIT {k}"""
+
+            cur.execute("SET lantern_hnsw.ef = 1000")
             if explain:
+                print(query)
                 pprint(
                     cur.execute(
                         f"EXPLAIN (ANALYZE, BUFFERS, TIMING) {query}"
@@ -272,7 +310,7 @@ def vector_search(
                     assert q_vector_id is not None and tags is None
                     near_ids = [r[0] for r in res]
                     # NULLIF makes sure division does not become division by zero. it leverages the fact that NULL/0 = NULL
-                    return_recall_q = f"NULLIF(CARDINALITY(ARRAY(SELECT jsonb_array_elements_text(q.blob->'neighbors'))::INTEGER[] & ARRAY{near_ids}::integer[])::float, 0) / LEAST({k}, (q.blob->'selectivity')::INTEGER) as recall"
+                    return_recall_q = f"NULLIF(CARDINALITY(ARRAY(SELECT jsonb_array_elements_text(q.blob->'neighbors'))::INTEGER[] & ARRAY{near_ids}::integer[])::float, 0) / LEAST({k}, ((q.blob->'selectivity')[0])::INTEGER) as recall"
                     recall = cur.execute(
                         f"SELECT {return_recall_q} FROM yfcc_queries q WHERE id = {q_vector_id}"
                     ).fetchone()[0]
@@ -329,3 +367,49 @@ def bulk_vector_search(
             print(query)
             res = cur.execute(query)
             return res.fetchall()
+
+
+def run_experiment(conn_string, limit = 10000, offset = 0, pgvector=False, explain = False):
+    recalls = np.zeros(limit)
+    latencies = np.zeros(limit)
+
+    pg_stat_reset(conn_string)
+    
+    for i in range(0,limit):
+        if i % 100 == 0:
+            print(f"{i}/{limit}")
+        # measure the time the next line
+        t = time()
+        r, recall =vector_search(conn_string,  q_vector_id=offset+i, explain = explain, materialize_first=True, return_recall=True, reuse_conn=True, pgvector=pgvector, prefilter_count=0)
+        if explain:
+            break
+        if recall < 0.8:
+            with psycopg.connect(conn_string) as conn:
+                with conn.cursor() as cur:
+                    res = cur.execute(f"SELECT blob from yfcc_queries where id = {i}").fetchone()
+                    # print(f"low recall({recall}) on query: {res}")
+                    if res[0]['selectivity'][0] < 1000:
+                        print("low selectivity", res)
+        search_time = time()-t
+        latencies[i] = search_time * 1000
+        recalls[i] = recall
+    from time import sleep
+    sleep(5)
+    stats = pg_stat_show(conn_string)
+    plt.hist(latencies)
+    plt.savefig(f"latencies_pgvector_{pgvector}.png")
+    pprint(stats)
+    print(f"use pgvector: {pgvector} max latency(ms)", latencies.max())
+
+    for percentile in [50, 95, 99]:
+        print(f"use pgvector: {pgvector}  {percentile} percentile latency(ms)", np.percentile(latencies, percentile))
+    print(f"use pgvector: {pgvector} mean recall is {recalls.mean()}, p95 recall is {np.percentile(recalls, 100-95)}")
+    return recalls, latencies, stats
+
+if __name__ == "__main__":
+    conn_string = "postgresql://postgres:postgres@localhost:6666"
+
+    for use_pgvector in [True, False]:
+        recalls, latencies, stats = run_experiment(conn_string, 200, pgvector=use_pgvector)
+        plt.hist(latencies)
+    
