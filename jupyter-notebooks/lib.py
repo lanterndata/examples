@@ -265,13 +265,10 @@ def vector_search(
                 q_vector = "ARRAY%s" % (cur.execute(q_vector).fetchone())
                 if isinstance(tags_array, str):
                     tags_from_querydb = cur.execute(tags_array).fetchone()[0]
-                    print(tags_from_querydb)
                     tags_array = [f"ARRAY[{t}]" for t in tags_from_querydb]
-                    print(tags_array)
 
 
             tags_filter_query = " AND ".join([f"metadata_tags @> {t}" for t in tags_array])
-            print("haha", tags_filter_query)
             if prefilter_count > 0 and cur.execute(f"SELECT count(*) FROM (SELECT 1 FROM yfcc_passages WHERE metadata_tags @> {tags_array} LIMIT {prefilter_count}) sub").fetchone()[0] < prefilter_count:
                 print("Prefiltering did not return enough results, skipping")
                 query = f"""
