@@ -18,10 +18,10 @@ def get_yfcc_data(queries=False, dataset="100K"):
     
     # make sure to authenticate with gcloud before running this
     # ./google-cloud-sdk/bin/gcloud auth application-default login
-    # yfcc_data = pd.read_parquet("gs://pinecone-datasets-dev/yfcc-10M-filter-euclidean-formatted/queries/part-0.parquet")
+    # yfcc_data = pd.read_parquet("https://pinecone-datasets-dev.storage.googleapis.com/yfcc-10M-filter-euclidean-formatted/queries/part-0.parquet")
     queries_str = "queries" if queries else "passages"
     yfcc_data = pd.read_parquet(
-        f"gs://pinecone-datasets-dev/yfcc-{dataset}-filter-euclidean-formatted/{queries_str}/part-0.parquet"
+        f"https://pinecone-datasets-dev.storage.googleapis.com/yfcc-{dataset}-filter-euclidean-formatted/{queries_str}/part-0.parquet"
     )
     return yfcc_data
 
