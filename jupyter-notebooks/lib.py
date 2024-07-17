@@ -16,9 +16,8 @@ import matplotlib.pyplot as plt
 def get_yfcc_data(queries=False, dataset="100K"):
     # size: 100K or 10M
     
-    # make sure to authenticate with gcloud before running this
+    # NOTE: make sure to authenticate with gcloud if accessing buckets via a gs:// url
     # ./google-cloud-sdk/bin/gcloud auth application-default login
-    # yfcc_data = pd.read_parquet("https://pinecone-datasets-dev.storage.googleapis.com/yfcc-10M-filter-euclidean-formatted/queries/part-0.parquet")
     queries_str = "queries" if queries else "passages"
     yfcc_data = pd.read_parquet(
         f"https://pinecone-datasets-dev.storage.googleapis.com/yfcc-{dataset}-filter-euclidean-formatted/{queries_str}/part-0.parquet"
@@ -191,7 +190,9 @@ def create_extensions(conn_string):
         with conn.cursor() as cur:
             cur.execute(
                 """CREATE EXTENSION iF NOT EXISTS intarray;
-                   CREATE EXTENSION iF NOT EXISTS lantern;"""
+                   CREATE EXTENSION iF NOT EXISTS lantern;
+                   CREATE EXTENSION  pg_prewarm;
+                """
             )
 
 
@@ -292,7 +293,7 @@ def vector_search(
                 ORDER BY dist
                 LIMIT {k}"""
 
-            cur.execute("SET lantern_hnsw.ef = 1000")
+            cur.execute("SET lantern_hnsw.ef = 400")
             if explain:
                 print(query)
                 pprint(
@@ -307,7 +308,7 @@ def vector_search(
                     assert q_vector_id is not None and tags is None
                     near_ids = [r[0] for r in res]
                     # NULLIF makes sure division does not become division by zero. it leverages the fact that NULL/0 = NULL
-                    return_recall_q = f"NULLIF(CARDINALITY(ARRAY(SELECT jsonb_array_elements_text(q.blob->'neighbors'))::INTEGER[] & ARRAY{near_ids}::integer[])::float, 0) / LEAST({k}, ((q.blob->'selectivity')[0])::INTEGER) as recall"
+                    return_recall_q = f"NULLIF(CARDINALITY(ARRAY(SELECT jsonb_array_elements_text(q.blob->'neighbors'))::INTEGER[] & ARRAY{near_ids}::integer[])::float, 0) / LEAST({k}, ((q.blob->'selectivity'))::INTEGER) as recall"
                     recall = cur.execute(
                         f"SELECT {return_recall_q} FROM yfcc_queries q WHERE id = {q_vector_id}"
                     ).fetchone()[0]
@@ -366,13 +367,24 @@ def bulk_vector_search(
             return res.fetchall()
 
 
+
+
+def run_query(conn_string, s):
+    print(f"running {s}")
+
+    with psycopg.connect(conn_string) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(s)
+        
+
+
 def run_experiment(conn_string, limit = 10000, offset = 0, pgvector=False, explain = False):
     recalls = np.zeros(limit)
     latencies = np.zeros(limit)
 
     pg_stat_reset(conn_string)
     
-    for i in range(0,limit):
+    for i in range(0, limit):
         if i % 100 == 0:
             print(f"{i}/{limit}")
         # measure the time the next line
@@ -384,8 +396,8 @@ def run_experiment(conn_string, limit = 10000, offset = 0, pgvector=False, expla
             with psycopg.connect(conn_string) as conn:
                 with conn.cursor() as cur:
                     res = cur.execute(f"SELECT blob from yfcc_queries where id = {i}").fetchone()
-                    # print(f"low recall({recall}) on query: {res}")
-                    if res[0]['selectivity'][0] < 1000:
+                    print(f"low recall({recall}) on query: {res}")
+                    if res[0]['selectivity'] < 1000:
                         print("low selectivity", res)
         search_time = time()-t
         latencies[i] = search_time * 1000
