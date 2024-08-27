@@ -12,11 +12,11 @@ conn = psycopg2.connect(
     user="postgres",
     password="password",
     host="localhost",
-    port="5432" # default port for Postgres
+    port="5432"  # default port for Postgres
 )
 
 # how we created the table in psql:
-#CREATE TABLE images (id SERIAL PRIMARY KEY, path text, vector real[]);
+# CREATE TABLE images (id SERIAL PRIMARY KEY, path text, vector real[]);
 
 TABLE_NAME = "images"
 
@@ -25,11 +25,12 @@ cursor = conn.cursor()
 
 
 for embedding, path in loaded_embeddings_paths_pairs:
-   cursor.execute(f"INSERT INTO {TABLE_NAME}(path, vector) VALUES (%s, %s);", (path, embedding))
-    
+    cursor.execute(
+        f"INSERT INTO {TABLE_NAME}(path, vector) VALUES (%s, %s);", (path, embedding))
+
 
 conn.commit()
 cursor.close()
 
 # index creation command:
-# CREATE INDEX on images USING hnsw (vector dist_cos_ops);
+# CREATE INDEX on images USING lantern_hnsw (vector dist_cos_ops);
